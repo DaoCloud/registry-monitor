@@ -32,6 +32,12 @@ Docker Example:
 docker run --privileged -e UNDER_DOCKER=true -v /var/run/docker.sock:/var/run/docker.sock -p 8000:8000 registry-monitor -username=myuser+robot -password=myrobottoken -registry-host=quay.io -repository=quay.io/myuser/monitorrepo -base-layer-id=4f83eba78c
 ```
 
+Pageduty alert
+
+```
+-pageduty-service-key=xxx  -monitor-location=usa-outip-node-1
+```
+
 Reading the monitor
 =============================
 The monitor exposes three HTTP endpoints on port 8000:

@@ -17,6 +17,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	log "github.com/Sirupsen/logrus"
+	"encoding/json"
+	"bytes"
+	"errors"
 )
 
 var listen = flag.String("listen", ":8000", "")
@@ -26,10 +29,15 @@ var dockerPassword = flag.String("password", "", "Registry password for pulling 
 var registryHost = flag.String("registry-host", "", "Hostname of the registry being monitored")
 var repository = flag.String("repository", "", "Repository on the registry to pull and push")
 var baseLayer = flag.String("base-layer-id", "", "Docker V1 ID of the base layer in the repository")
+var pagedutyServiceKey = flag.String("pageduty-service-key", "", "pageduty service key")
+var monitorLocation = flag.String("monitor-location", "", "monitor location")
+var checkJobDuration = flag.Int("checkjob-duration", 2, "checkJob duration")
+
+const DefaultPagerDutyAPIURL = "https://events.pagerduty.com/generic/2010-04-15/create_event.json"
 
 var (
 	healthy bool
-	status  bool
+	status bool
 )
 
 var (
@@ -86,8 +94,69 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	if !status {
 		w.WriteHeader(400)
 	}
-
 	fmt.Fprintf(w, "%t", status)
+}
+
+func alert(status bool) {
+	if err := pageduty(status); err != nil {
+		log.Errorf("failed to alert PagerDuty . err: %v", err)
+	}
+}
+
+func pageduty(status bool) error {
+	if *pagedutyServiceKey == "" {
+		log.Info("pagedutyServiceKey not define, do nothing.")
+		return nil
+	}
+	if *monitorLocation == "" {
+		resp, err := http.Get("http://ifconfig.me/ip")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		monitorLocationStr := string(body)
+		monitorLocation = &monitorLocationStr
+	}
+	var eventType string
+	if status == false {
+		eventType = "trigger"
+	} else {
+		eventType = "resolve"
+	}
+	pagedutyData := make(map[string]string)
+	pagedutyData["service_key"] = *pagedutyServiceKey
+	pagedutyData["event_type"] = eventType
+	pagedutyData["description"] = fmt.Sprintf("registry[%v][location:%v] pull or push  status: %v . ", *registryHost, *monitorLocation, status)
+	pagedutyData["incident_key"] = *monitorLocation
+	pagedutyData["client"] = "registry_monitor"
+	pagedutyData["client_url"] = *monitorLocation
+	pagedutyData["details"] = fmt.Sprintf("registry[%v][location:%v] pull or push  status: %v . ", *registryHost, *monitorLocation, status)
+
+	// Post data to PagerDuty
+	var post bytes.Buffer
+	enc := json.NewEncoder(&post)
+	err := enc.Encode(pagedutyData)
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(DefaultPagerDutyAPIURL, "application/json", &post)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		errMessage := fmt.Sprintf("failed to understand PagerDuty response. code: %d content: %s", resp.StatusCode, string(body))
+		return errors.New(errMessage)
+	}
+	return nil
 }
 
 func buildTLSTransport(basePath string) (*http.Transport, error) {
@@ -444,10 +513,11 @@ func runMonitor() {
 	healthy = true
 
 	mainLoop := func() {
-		duration := 2 * time.Minute
+		duration := time.Duration(*checkJobDuration) * time.Minute
 
 		for {
 			if !firstLoop {
+				go alert(status)
 				log.Infof("Sleeping for %v", duration)
 				time.Sleep(duration)
 			}
@@ -483,7 +553,7 @@ func runMonitor() {
 			log.Infof("Pulling test image")
 			pullStartTime := time.Now()
 			if !pullTestImage(dockerClient) {
-				duration = 30 * time.Second
+				duration = time.Duration(*checkJobDuration * 30) * time.Second
 
 				// Write the failure metric.
 				m, err := promFailureMetric.GetMetricWithLabelValues()
@@ -511,7 +581,7 @@ func runMonitor() {
 			log.Infof("Pushing test image")
 			pushStartTime := time.Now()
 			if !pushTestImage(dockerClient) {
-				duration = 30 * time.Second
+				duration = time.Duration(*checkJobDuration * 30) * time.Second
 				// Write the failure metric.
 				m, err := promFailureMetric.GetMetricWithLabelValues()
 				if err != nil {
@@ -527,7 +597,7 @@ func runMonitor() {
 			promPushMetric.Observe(time.Since(pushStartTime).Seconds())
 
 			log.Infof("Test successful")
-			duration = 2 * time.Minute
+			duration = time.Duration(*checkJobDuration) * time.Minute
 
 			// Write the success metric.
 			m, err := promSuccessMetric.GetMetricWithLabelValues()
@@ -536,8 +606,10 @@ func runMonitor() {
 			}
 
 			m.Inc()
+
 		}
 	}
 
 	go mainLoop()
+
 }
