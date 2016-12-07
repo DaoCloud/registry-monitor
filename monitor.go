@@ -38,6 +38,7 @@ const DefaultPagerDutyAPIURL = "https://events.pagerduty.com/generic/2010-04-15/
 var (
 	healthy bool
 	status bool
+	status_detail string
 )
 
 var (
@@ -97,13 +98,20 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "%t", status)
 }
 
-func alert(status bool) {
-	if err := pageduty(status); err != nil {
-		log.Errorf("failed to alert PagerDuty . err: %v", err)
+func alert() {
+	duration := time.Duration(*checkJobDuration) * time.Minute
+	for{
+		log.Infof("Sleeping for %v", duration)
+		time.Sleep(duration)
+		if err := pageduty(status,healthy,status_detail); err != nil {
+			log.Errorf("failed to alert PagerDuty . err: %v", err)
+		}
+
 	}
+
 }
 
-func pageduty(status bool) error {
+func pageduty(status,healthy bool,status_detail string) error {
 	if *pagedutyServiceKey == "" {
 		log.Info("pagedutyServiceKey not define, do nothing.")
 		return nil
@@ -122,7 +130,7 @@ func pageduty(status bool) error {
 		monitorLocation = &monitorLocationStr
 	}
 	var eventType string
-	if status == false {
+	if status == false ||healthy ==false{
 		eventType = "trigger"
 	} else {
 		eventType = "resolve"
@@ -130,11 +138,11 @@ func pageduty(status bool) error {
 	pagedutyData := make(map[string]string)
 	pagedutyData["service_key"] = *pagedutyServiceKey
 	pagedutyData["event_type"] = eventType
-	pagedutyData["description"] = fmt.Sprintf("registry[%v][location:%v] pull or push  status: %v . ", *registryHost, *monitorLocation, status)
+	pagedutyData["description"] = fmt.Sprintf("registry[%v][location:%v] pull or push  healthy: %v, status: %v . ", *registryHost, *monitorLocation,healthy, status)
 	pagedutyData["incident_key"] = *monitorLocation
 	pagedutyData["client"] = "registry_monitor"
 	pagedutyData["client_url"] = *monitorLocation
-	pagedutyData["details"] = fmt.Sprintf("registry[%v][location:%v] pull or push  status: %v . ", *registryHost, *monitorLocation, status)
+	pagedutyData["details"] = fmt.Sprintf("registry[%v][location:%v] pull or push  healthy: %v, status: %v , status_detail : %v ", *registryHost, *monitorLocation,healthy, status,status_detail)
 
 	// Post data to PagerDuty
 	var post bytes.Buffer
@@ -155,6 +163,9 @@ func pageduty(status bool) error {
 		}
 		errMessage := fmt.Sprintf("failed to understand PagerDuty response. code: %d content: %s", resp.StatusCode, string(body))
 		return errors.New(errMessage)
+	}
+	if status == false ||healthy ==false{
+		log.Info("pageduty alert send")
 	}
 	return nil
 }
@@ -211,7 +222,8 @@ func stringInSlice(value string, list []string) bool {
 func verifyDockerClient(dockerClient *docker.Client) bool {
 	log.Infof("Trying to connect to Docker client")
 	if err := dockerClient.Ping(); err != nil {
-		log.Errorf("Error connecting to Docker client: %s", err)
+		status_detail=fmt.Sprintf("Error connecting to Docker client: %s", err)
+		log.Errorf("%s",status_detail)
 		healthy = false
 		return false
 	}
@@ -228,7 +240,8 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 	log.Infof("Listing all containers")
 	containers, err := dockerClient.ListContainers(listOptions)
 	if err != nil {
-		log.Errorf("Error listing containers: %s", err)
+		status_detail=fmt.Sprintf("Error listing containers: %s", err)
+		log.Errorf("%s",status_detail)
 		healthy = false
 		return false
 	}
@@ -246,7 +259,8 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 		}
 
 		if err = dockerClient.RemoveContainer(removeOptions); err != nil {
-			log.Errorf("Error removing container: %s", err)
+			status_detail=fmt.Sprintf("Error removing container: %s", err)
+			log.Errorf("%s",status_detail)
 			healthy = false
 			return false
 		}
@@ -271,7 +285,8 @@ func clearAllImages(dockerClient *docker.Client) bool {
 		log.Infof("Listing docker images")
 		images, err := dockerClient.ListImages(listOptions)
 		if err != nil {
-			log.Errorf("Could not list images: %s", err)
+			status_detail=fmt.Sprintf("Could not list images: %s", err)
+			log.Errorf("%s",status_detail)
 			healthy = false
 			return false
 		}
@@ -300,7 +315,8 @@ func clearAllImages(dockerClient *docker.Client) bool {
 			log.Infof("Clearing image %s", image.ID)
 			if err = dockerClient.RemoveImage(image.ID); err != nil {
 				if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
-					log.Errorf("%s", err)
+					status_detail=fmt.Sprintf("RemoveImage err: %s", err)
+					log.Errorf("%s",status_detail)
 					healthy = false
 					return false
 				} else {
@@ -336,6 +352,7 @@ func pullTestImage(dockerClient *docker.Client) bool {
 
 	if err := dockerClient.PullImage(pullOptions, pullAuth); err != nil {
 		log.Errorf("Pull Error: %s", err)
+		status_detail=fmt.Sprintf("Pull Error err %s",err)
 		status = false
 		return false
 	}
@@ -346,7 +363,8 @@ func pullTestImage(dockerClient *docker.Client) bool {
 func deleteTopLayer(dockerClient *docker.Client) bool {
 	imageHistory, err := dockerClient.ImageHistory(*repository)
 	if err != nil {
-		log.Errorf("%s", err)
+		status_detail=fmt.Sprintf("ImageHistory err: %s", err)
+		log.Errorf("%s",status_detail)
 		healthy = false
 		return false
 	}
@@ -355,7 +373,8 @@ func deleteTopLayer(dockerClient *docker.Client) bool {
 		if stringInSlice("latest", image.Tags) {
 			log.Infof("Deleting image %s", image.ID)
 			if err = dockerClient.RemoveImage(image.ID); err != nil {
-				log.Errorf("%s", err)
+				status_detail=fmt.Sprintf("RemoveImage err: %s", err)
+				log.Errorf("%s",status_detail)
 				healthy = false
 				return false
 			}
@@ -384,7 +403,8 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	}
 
 	if _, err := dockerClient.CreateContainer(options); err != nil {
-		log.Errorf("Error creating container: %s", err)
+		status_detail=fmt.Sprintf("Error creating container: %s", err)
+		log.Errorf("%s",status_detail)
 		healthy = false
 		return false
 	}
@@ -397,7 +417,8 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	}
 
 	if _, err := dockerClient.CommitContainer(commitOptions); err != nil {
-		log.Errorf("Error committing Container: %s", err)
+		status_detail=fmt.Sprintf("Error committing Container: %s", err)
+		log.Errorf("%s",status_detail)
 		healthy = false
 		return false
 	}
@@ -410,7 +431,8 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	}
 
 	if err := dockerClient.RemoveContainer(removeOptions); err != nil {
-		log.Errorf("Error removing container: %s", err)
+		status_detail=fmt.Sprintf("Error removing container: %s", err)
+		log.Errorf("%s",status_detail)
 		healthy = false
 		return false
 	}
@@ -433,6 +455,7 @@ func pushTestImage(dockerClient *docker.Client) bool {
 
 	if err := dockerClient.PushImage(pushOptions, pushAuth); err != nil {
 		log.Errorf("Push Error: %s", err)
+		status_detail=fmt.Sprintf("Push Error err %s",err)
 		status = false
 		return false
 	}
@@ -517,7 +540,6 @@ func runMonitor() {
 
 		for {
 			if !firstLoop {
-				go alert(status)
 				log.Infof("Sleeping for %v", duration)
 				time.Sleep(duration)
 			}
@@ -530,6 +552,7 @@ func runMonitor() {
 			dockerClient, err := newDockerClient(dockerHost)
 			if err != nil {
 				log.Errorf("%s", err)
+				status_detail=fmt.Sprintf("newDockerClient err: %s",err)
 				healthy = false
 				return
 			}
@@ -611,5 +634,6 @@ func runMonitor() {
 	}
 
 	go mainLoop()
+	go alert()
 
 }
